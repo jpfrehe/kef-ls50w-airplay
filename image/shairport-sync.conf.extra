@@ -1,0 +1,8 @@
+
+// --- appended by kef-ls50w-airplay (image/shairport-sync.conf.extra) ---
+// For troubleshooting (together with LOG_LEVEL=debug in docker-compose.yml):
+// diagnostics =
+// {
+// 	log_verbosity = 1;
+// 	statistics = "yes";
+// };

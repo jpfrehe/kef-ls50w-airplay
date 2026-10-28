@@ -1,0 +1,21 @@
+# --- kef-ls50w-airplay: add to configuration.yaml (render with tools/render_ha.py) ---
+# Merge into existing input_boolean: / shell_command: sections if you already have them.
+input_boolean:
+  kef_airplay_active:
+    name: KEF AirPlay active
+    icon: mdi:airplay
+  kef_tv_active:
+    name: KEF Apple TV active
+    icon: mdi:television-play
+
+shell_command:
+  # Switches the KEF on and selects the source (wifi|opt). Retries for up to {{ wait }} s: right
+  # after booting the KEF often does not acknowledge the switch (HA aborts after 60 s).
+  kef_source: "/usr/local/bin/python3 /config/kef/kef_ctl.py --host ${KEF_HOST} on --source {{ source }} --wait {{ wait | default(50) }}"
+  # KEF on the network? via the DLNA port 8080 (leaves the control port free); always exits 0,
+  # stdout is online|offline
+  kef_status: "/usr/local/bin/python3 /config/kef/kef_ctl.py --host ${KEF_HOST} online || true"
+  # waits up to {{ wait }} s for the KEF to boot after the IR signal (exit 0 = online)
+  kef_wait_online: "/usr/local/bin/python3 /config/kef/kef_ctl.py --host ${KEF_HOST} online --wait {{ wait | default(25) }}"
+  # KEF to standby, but only if it is on Opt (always exits 0; stdout tells what happened)
+  kef_standby_if_opt: "/usr/local/bin/python3 /config/kef/kef_ctl.py --host ${KEF_HOST} standby --only-if-source opt || true"

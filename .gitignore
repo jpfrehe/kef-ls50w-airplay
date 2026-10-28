@@ -1,0 +1,9 @@
+# local configuration - contains the webhook secret and addresses of your network
+.env
+docker-compose.yml
+build/
+music-assistant/
+homeassistant-config/
+__pycache__/
+*.pyc
+.DS_Store

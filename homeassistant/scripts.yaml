@@ -1,0 +1,159 @@
+# --- kef-ls50w-airplay: add to scripts.yaml (render with tools/render_ha.py) ---
+kef_power_on:
+  alias: KEF – switch on and select source
+  description: >-
+    If the KEF is in standby (not on the network), the IR blaster (Moes UFO-R11 via ZHA) sends the
+    power key. The UFO-R11 runs on batteries and misses IR jobs while it sleeps. Therefore: wake-up
+    call (Identify, script.kef_ir_wake), send IR only after a confirmed wake-up, wait up to 45 s for
+    the KEF and only retry if it is still not on the network (max. 12 rounds; 5 s pause without an
+    answer). If that fails, a notification is sent. The power key toggles; the KEF boots about
+    13-16 s after the IR signal, the 45 s prevent switching it off again by accident.
+    Whether the KEF is running is checked via the DLNA port 8080 (kef_ctl online) - the control
+    port 50001 accepts only one connection and stays free for whoever sets the source.
+    source: opt (Apple TV) selects the source afterwards; none (AirPlay) only wakes the KEF - it
+    switches to Wi-Fi by itself when Music Assistant starts DLNA playback.
+    Mode queued: concurrent calls run one after another.
+  mode: queued
+  max: 10
+  fields:
+    source:
+      description: Source of the KEF (wifi, opt) or none (only switch on)
+      example: opt
+      required: true
+      selector:
+        select:
+          options: [wifi, opt, none]
+  variables:
+    ir_ieee: "${IR_IEEE}"
+    ir_code_power: "${IR_CODE_POWER}"
+  sequence:
+    - action: shell_command.kef_status
+      response_variable: status
+      continue_on_error: true
+    - variables:
+        # kef_status always exits 0; "online" on stdout = KEF switched on
+        kef_on: "{{ status is defined and status.stdout.strip() == 'online' }}"
+    - if: "{{ not kef_on }}"
+      then:
+        - repeat:
+            sequence:
+              # Send IR only if the blaster confirmed the wake-up call: kef_ir_wake fails otherwise
+              # and returns no result. An IR command sent blindly gets lost (the blaster fetches it
+              # in several steps and has to be awake for that). The attempt number in the result
+              # prevents the answer of an earlier round (variables survive across repeat rounds)
+              # from counting as confirmation.
+              - action: script.kef_ir_wake
+                continue_on_error: true
+                response_variable: wake
+                data:
+                  ir_ieee: "{{ ir_ieee }}"
+                  attempt: "{{ repeat.index }}"
+              - if: "{{ wake is defined and (wake.attempt | default(0) | int) == repeat.index }}"
+                then:
+                  - action: zha.issue_zigbee_cluster_command
+                    continue_on_error: true
+                    data:
+                      ieee: "{{ ir_ieee }}"
+                      endpoint_id: 1
+                      cluster_id: 57348        # 0xE004 ZosungIRControl
+                      cluster_type: in
+                      command: 2               # IRSend
+                      command_type: server
+                      params:
+                        code: "{{ ir_code_power }}"
+                  # IRSend returns immediately; the blaster then fetches the code in several steps
+                  # (measured up to 23 s with a poor radio link), the KEF boots ~15 s after the IR
+                  # signal. The power key toggles, so only resend after 45 s without the KEF.
+                  - action: shell_command.kef_wait_online
+                    continue_on_error: true
+                    data:
+                      wait: 45
+                else:
+                  # blaster asleep or briefly off the network (NWK_NO_ROUTE/MAC_NO_ACK) - try again
+                  - delay: { seconds: 5 }
+              - action: shell_command.kef_status
+                continue_on_error: true
+                response_variable: status
+            until: "{{ (status is defined and status.stdout.strip() == 'online') or repeat.index >= 12 }}"
+        - action: shell_command.kef_status
+          continue_on_error: true
+          response_variable: status_end
+        - if: "{{ not (status_end is defined and status_end.stdout.strip() == 'online') }}"
+          then:
+            - action: notify.send_message
+              continue_on_error: true
+              target:
+                entity_id: ${NOTIFY_ENTITY}
+              data:
+                title: KEF not switched on
+                message: >-
+                  The IR blaster (UFO-R11) did not respond. Briefly press the button on the
+                  blaster and restart AirPlay or the Apple TV.
+            - action: persistent_notification.create
+              data:
+                notification_id: kef_ir_error
+                title: KEF not switched on
+                message: >-
+                  The IR blaster (UFO-R11) did not respond in 12 attempts
+                  ({{ now().strftime('%H:%M') }}). Briefly press the button on the blaster.
+            - stop: IR blaster did not respond
+              error: true
+    - if: "{{ source != 'none' }}"
+      then:
+        # right after booting the KEF only acknowledges the switch after ~20 s;
+        # kef_ctl retries for up to 45 s (HA aborts a shell_command after 60 s)
+        - action: shell_command.kef_source
+          continue_on_error: true
+          data:
+            source: "{{ source }}"
+            wait: 45
+
+kef_ir_wake:
+  alias: KEF – wake IR blaster
+  description: >-
+    Sends Identify to the UFO-R11. Identify is delivered with acknowledgement and retries; if the
+    blaster does not answer, the script fails. Otherwise it returns {awake: true, attempt} and the
+    blaster stays awake for a few seconds (Identify runs 5 s), long enough for the multi-step IR
+    transfer. Called by script.kef_power_on.
+  mode: queued
+  fields:
+    ir_ieee:
+      description: IEEE address of the UFO-R11
+      required: true
+    attempt:
+      description: attempt number of the caller, returned in the result
+  sequence:
+    - action: zha.issue_zigbee_cluster_command
+      data:
+        ieee: "{{ ir_ieee }}"
+        endpoint_id: 1
+        cluster_id: 3                # Identify
+        cluster_type: in
+        command: 0                   # identify
+        command_type: server
+        params:
+          identify_time: 5
+    - variables:
+        result: { awake: true, attempt: "{{ attempt | default(0) | int }}" }
+    - stop: blaster awake
+      response_variable: result
+
+kef_ir_learn:
+  alias: KEF – learn IR key
+  description: >-
+    Puts the UFO-R11 into learning mode for a few seconds. Briefly press the button on the UFO-R11
+    first (it is asleep otherwise). Then point the power key of the KEF remote at the blaster and
+    press it. Read the code in ZHA under device > Manage Zigbee device > Clusters >
+    ZosungIRControl > attribute last_learned_ir_code and put it into IR_CODE_POWER in your .env.
+  mode: single
+  sequence:
+    - action: zha.issue_zigbee_cluster_command
+      data:
+        ieee: "${IR_IEEE}"
+        endpoint_id: 1
+        cluster_id: 57348
+        cluster_type: in
+        command: 1                   # IRLearn
+        command_type: server
+        params:
+          on_off: true

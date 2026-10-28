@@ -1,0 +1,56 @@
+# Copy to docker-compose.yml (or merge into your existing one) and create .env from .env.example.
+# Home Assistant itself is not part of this file - use your existing installation.
+services:
+  music-assistant:
+    build: ./image
+    image: kef-ls50w-airplay:2.10.8
+    container_name: music-assistant
+    restart: unless-stopped
+    network_mode: host  # required for mDNS/AirPlay and UPnP discovery
+    volumes:
+      - ${MA_DATA_DIR}:/data
+    environment:
+      - LOG_LEVEL=info
+      # classic = AirPlay 1 (ALAC, lossless); airplay2 = AirPlay 2 (AAC, Home app/multiroom)
+      - SHAIRPORT_MODE=${SHAIRPORT_MODE}
+      # shorter shairport-sync lead time (s, negative = earlier to MA), compensates the KEF buffer
+      - SHAIRPORT_LATENCY_OFFSET=${SHAIRPORT_LATENCY_OFFSET}
+      - AVAHI_INTERFACES=${AVAHI_INTERFACES}
+      - AVAHI_HOSTNAME=${AVAHI_HOSTNAME}
+      # pad 16 -> 24 bit (image/patch_ma.py): starts 0.4 s faster but sounded worse on the KEF -> off
+      - MA_PAD_BIT_DEPTH=0
+      # reconnect the KEF right after standby instead of after the next SSDP search (patch_ma.py)
+      - MA_DLNA_RECONNECT=1
+      # one HTTP connection per DLNA call - a freshly booted KEF waits for keep-alive connections
+      - MA_DLNA_FORCE_CLOSE=1
+      # session hook (image/kef_power_hook.sh) -> Home Assistant automation kef_speaker_control
+      - KEF_HOST=${KEF_HOST}
+      - KEF_WEBHOOK_START=${HA_URL}/api/webhook/kef_airplay_start_${WEBHOOK_SUFFIX}
+      - KEF_WEBHOOK_STOP=${HA_URL}/api/webhook/kef_airplay_stop_${WEBHOOK_SUFFIX}
+      - KEF_BOOT_TIMEOUT=150
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  kef-atv-watcher:
+    # Reports Apple TV power/playback to Home Assistant via webhooks (pyatv, same image)
+    image: kef-ls50w-airplay:2.10.8
+    container_name: kef-atv-watcher
+    restart: unless-stopped
+    network_mode: host
+    depends_on: [music-assistant]  # only so that the image gets built first
+    entrypoint: ["/opt/atv/bin/python", "-u", "/usr/local/bin/atv_watcher.py"]
+    volumes:
+      - ${HA_CONFIG_DIR}/.storage:/ha-storage:ro  # pairing credentials of the Apple TV integration
+    environment:
+      - ATV_NAME=${ATV_NAME}
+      - WEBHOOK_ACTIVE=${HA_URL}/api/webhook/kef_atv_active_${WEBHOOK_SUFFIX}
+      - WEBHOOK_INACTIVE=${HA_URL}/api/webhook/kef_atv_inactive_${WEBHOOK_SUFFIX}
+      - WEBHOOK_POWER_OFF=${HA_URL}/api/webhook/kef_atv_power_off_${WEBHOOK_SUFFIX}
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

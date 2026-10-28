@@ -1,0 +1,124 @@
+# --- kef-ls50w-airplay: add to automations.yaml (render with tools/render_ha.py) ---
+- id: kef_speaker_control
+  alias: KEF LS50 Wireless – power and source (AirPlay + Apple TV)
+  description: >-
+    AirPlay (webhook from Music Assistant) or the Apple TV (webhook from kef-atv-watcher) start:
+    script.kef_power_on wakes the KEF via IR if needed and selects the source (AirPlay -> Wi-Fi,
+    Apple TV -> Opt). The last one started wins; when one ends, the source goes back to the other
+    if it is still running. Switching the Apple TV off puts the KEF into standby (only without
+    AirPlay and only from Opt); otherwise the KEF falls asleep through its auto-standby. When AirPlay
+    ends without the TV, the KEF goes to Opt so it falls asleep on Opt: a TV start from standby then
+    needs no (slow) source switch, and AirPlay switches to Wi-Fi by itself when it starts.
+    The webhooks only set the two input_booleans; the actual work hangs off their state changes.
+  mode: queued
+  max: 20
+  variables:
+    airplay: input_boolean.kef_airplay_active
+    tv: input_boolean.kef_tv_active
+  triggers:
+    - trigger: webhook
+      webhook_id: kef_airplay_start_${WEBHOOK_SUFFIX}
+      allowed_methods: [POST]
+      local_only: true
+      id: airplay_start
+    - trigger: webhook
+      webhook_id: kef_airplay_stop_${WEBHOOK_SUFFIX}
+      allowed_methods: [POST]
+      local_only: true
+      id: airplay_stop
+    - trigger: webhook
+      webhook_id: kef_atv_active_${WEBHOOK_SUFFIX}
+      allowed_methods: [POST]
+      local_only: true
+      id: tv_webhook_on
+    - trigger: webhook
+      webhook_id: kef_atv_inactive_${WEBHOOK_SUFFIX}
+      allowed_methods: [POST]
+      local_only: true
+      id: tv_webhook_off
+    - trigger: webhook
+      webhook_id: kef_atv_power_off_${WEBHOOK_SUFFIX}
+      allowed_methods: [POST]
+      local_only: true
+      id: tv_power_off
+    - trigger: state
+      entity_id: input_boolean.kef_tv_active
+      from: "off"
+      to: "on"
+      id: tv_start
+    - trigger: state
+      entity_id: input_boolean.kef_tv_active
+      from: "on"
+      to: "off"
+      for: { minutes: 1 }
+      id: tv_stop
+    - trigger: state
+      entity_id: input_boolean.kef_airplay_active
+      from: "on"
+      to: "off"
+      for: { seconds: 15 }
+      id: airplay_ended
+  actions:
+    - choose:
+        - conditions: "{{ trigger.id == 'tv_webhook_on' }}"
+          sequence:
+            - action: input_boolean.turn_on
+              target: { entity_id: "{{ tv }}" }
+
+        # Apple TV switched off (power On -> Off only, not pause): KEF off unless AirPlay is
+        # running; kef_standby_if_opt only switches off if the KEF is on Opt
+        - conditions: "{{ trigger.id == 'tv_power_off' and is_state(airplay, 'off') }}"
+          sequence:
+            - action: shell_command.kef_standby_if_opt
+              continue_on_error: true
+
+        - conditions: "{{ trigger.id == 'tv_webhook_off' }}"
+          sequence:
+            - action: input_boolean.turn_off
+              target: { entity_id: "{{ tv }}" }
+
+        - conditions: "{{ trigger.id == 'airplay_start' }}"
+          sequence:
+            - action: input_boolean.turn_on
+              target: { entity_id: "{{ airplay }}" }
+            # wake only (non-blocking); the KEF switches to Wi-Fi by itself when Music Assistant
+            # starts DLNA playback, also from Opt
+            - action: script.turn_on
+              target: { entity_id: script.kef_power_on }
+              data: { variables: { source: none } }
+
+        - conditions: "{{ trigger.id == 'airplay_stop' }}"
+          sequence:
+            - action: input_boolean.turn_off
+              target: { entity_id: "{{ airplay }}" }
+            - if: "{{ is_state(tv, 'on') }}"
+              then:
+                - action: shell_command.kef_source
+                  continue_on_error: true
+                  data: { source: opt }
+
+        - conditions: "{{ trigger.id == 'tv_start' }}"
+          sequence:
+            - action: script.turn_on
+              target: { entity_id: script.kef_power_on }
+              data: { variables: { source: opt } }
+
+        - conditions: "{{ trigger.id == 'tv_stop' }}"
+          sequence:
+            - if: "{{ is_state(airplay, 'on') }}"
+              then:
+                - action: shell_command.kef_source
+                  continue_on_error: true
+                  data: { source: wifi }
+
+        # 15 s after AirPlay ended (KEF buffer played out, quick restarts ignored) without TV:
+        # to Opt, so the KEF falls asleep on Opt. With the TV on, airplay_stop already did that.
+        - conditions: "{{ trigger.id == 'airplay_ended' and is_state(tv, 'off') }}"
+          sequence:
+            - action: shell_command.kef_status
+              response_variable: status
+            - if: "{{ status is defined and status.stdout.strip() == 'online' }}"
+              then:
+                - action: shell_command.kef_source
+                  continue_on_error: true
+                  data: { source: opt, wait: 10 }
